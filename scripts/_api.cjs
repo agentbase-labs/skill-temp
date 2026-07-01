@@ -26,12 +26,18 @@ function saveConfig(config) {
   fs.chmodSync(CONFIG_FILE, 0o600);
 }
 
-async function api(endpoint, method = 'GET', body = null) {
+async function api(endpoint, method = 'GET', body = null, extraHeaders = null) {
   const config = loadConfig();
   const url = `${config.api_url}${endpoint}`;
   const opts = {
     method,
-    headers: { 'Authorization': `Bearer ${config.api_key}`, 'Content-Type': 'application/json' },
+    headers: {
+      'Authorization': `Bearer ${config.api_key}`,
+      'Content-Type': 'application/json',
+      // Optional extra headers (e.g. x-admin-key for admin-only ops endpoints).
+      // Tenant scripts don't pass this, so the shared Bearer client is unchanged.
+      ...(extraHeaders || {}),
+    },
   };
   if (body) opts.body = JSON.stringify(body);
 

@@ -484,22 +484,25 @@ After recreating, check service status and wait for the build to complete before
 
 Live web services and databases are re-billed **monthly on the 1st** (see **Recurring Billing & Dunning** in the reference section). If a monthly charge fails, the resource goes `past_due` → `suspended` (after 3 days) → hard-`DELETED` (after 30 days).
 
-**Resume a suspended site after topping up credits:**
+**Resume a suspended site after topping up credits (USER-facing recovery):**
 
 ```bash
 # 1. Add credits to the account email in the agentic app, then:
 node {baseDir}/scripts/retry-dunning.cjs
 ```
 
-`retry-dunning.cjs` re-attempts payment for every past-due resource, resumes suspended ones on Render, and prints a summary (recovered / suspended / hard-deleted / still-past-due). Use it whenever a user tops up and needs their suspended site back up without waiting for the daily 06:00 UTC cron.
+`retry-dunning.cjs` calls `POST /billing/retry-mine` — **tenant-scoped**, authenticated with the account's own API key. It re-attempts payment for **only this account's** past-due resources, resumes suspended ones on Render, and prints a summary (attempted / recovered / suspended / hard-deleted / still-past-due / errors). Use it whenever a user tops up and needs their own suspended site back up without waiting for the daily 06:00 UTC cron. It never touches other tenants' resources.
 
-**Trigger the monthly billing run manually (ops/testing):**
+> ⚠️ **Rate limit:** `retry-mine` is capped at **6/min per tenant**. On **HTTP 429**, back off and retry after ~1 minute — don't hammer.
+
+**Admin-only: trigger the GLOBAL monthly billing run (ops):**
 
 ```bash
-node {baseDir}/scripts/run-billing.cjs
+# ADMIN/OPS ONLY — needs an admin key; do NOT run this as a normal user/agent.
+ADMIN_API_KEY=... node {baseDir}/scripts/run-billing.cjs
 ```
 
-`run-billing.cjs` charges every live billable resource for the current period. It is idempotent per period (already-billed resources are skipped), so it's safe to run any time. Prints a summary of what was billed and anything that entered dunning.
+`run-billing.cjs` calls `POST /billing/run` — a **GLOBAL/admin-only** sweep across **every tenant**. It requires an `x-admin-key` header (env `ADMIN_API_KEY`, or `admin_api_key` in `~/.joni/agentbase/config.json`) and exits with a clear message if no admin key is available. Idempotent per period (already-billed resources are skipped). This is **not** something a normal user or agent runs — for resuming your own resources use `retry-dunning.cjs` above. (Throttled to 3 / 5 min.)
 
 ---
 
@@ -680,8 +683,8 @@ node {baseDir}/scripts/delete-commits.cjs --workflow-id <id> --count <N> [--type
 | Build passed but service crashed    | `deploy-logs.cjs --workflow-id <id> --type backend --log-type runtime`        |
 | SSL not active                      | `verify-ssl.cjs --workflow-id <id>` (retry every 5 min)                       |
 | Backend not responding              | `verify-health.cjs --workflow-id <id>` (retry 2-3x, cold starts take 30-60s)  |
-| Site went down / `suspended` (unpaid) | Add credits, then `retry-dunning.cjs` (resumes suspended resources)         |
-| Manually run the monthly bill (ops)   | `run-billing.cjs` (idempotent per period)                                   |
+| Site went down / `suspended` (unpaid) | Add credits, then `retry-dunning.cjs` → `/billing/retry-mine` (resumes **your own** suspended resources; 6/min) |
+| Manually run the monthly bill (ADMIN) | `run-billing.cjs` → `/billing/run` — **admin/ops only**, needs `ADMIN_API_KEY`; NOT a user command |
 
 ### Workflow Status
 
@@ -1218,7 +1221,7 @@ Note: `registering_domain` is a transient in-progress state. If registration fai
 **Billing / dunning states (can occur for either lifecycle once a resource is live).** These are driven by the recurring billing cron, not the deploy flow — a completed/live workflow can still enter them later if a monthly charge fails:
 
 - `paused_insufficient_funds` — a workflow step (or the deploy budget) hit HTTP 402 `insufficient_credits`. **Handling:** add credits to the account email in the app, then `increase-budget.cjs` / retry the paused step.
-- `suspended` — a live resource went `past_due` and, after **3 days** unpaid, was suspended on Render (site/backend goes down but is recoverable). **Handling:** add credits, then run `retry-dunning.cjs` to resume it.
+- `suspended` — a live resource went `past_due` and, after **3 days** unpaid, was suspended on Render (site/backend goes down but is recoverable). **Handling:** add credits, then run `retry-dunning.cjs` (→ `/billing/retry-mine`, your own resources) to resume it.
 - `DELETED` / `terminated` — a resource stayed unpaid **> 30 days** past-due and was hard-deleted on Render (irrecoverable). **Handling:** it must be rebuilt from scratch (new deploy).
 
 See **Recurring Billing & Dunning** below for the full ladder.
@@ -1235,6 +1238,16 @@ See **Recurring Billing & Dunning** below for the full ladder.
 - Stuck workflow recovery: failed domain registration resets workflow to `initialized` (retryable)
 - Idempotent deduct/refund keys prevent double-charges under retries; a best-effort local ledger (`/tenant/transactions`) records spends but never blocks a real spend
 
+### Rate Limits (HTTP 429)
+
+The API is now rate-limited per tenant. Expect and handle **HTTP 429 (Too Many Requests)** by **backing off ~1 minute and retrying** — do not hammer in a tight loop.
+
+- **Spending endpoints** (`initialize`, `register-domain`, `deploy`, `provision-database`, `recreate-service`, `increase-budget`): ~**10/min per tenant**.
+- **`retry-dunning.cjs` → `/billing/retry-mine`** (user recovery): **6/min per tenant**.
+- **`run-billing.cjs` → `/billing/run`** and the admin dunning sweep (admin/ops): **3 / 5 min**.
+
+List endpoints (`workflow/list`, `website/list`) are paginated: `?limit=` (default 50, max 200) and `?offset=` (default 0), and return `pagination` metadata (`total`, `limit`, `offset`, `count`, `hasMore`) alongside the array. The array key is unchanged (`workflows` / `websites`), so existing parsing keeps working; page through with `offset` if a tenant has more than 50 items.
+
 ### Recurring Billing & Dunning
 
 Deploys are **not** one-time costs. Understand this before quoting a price to the user.
@@ -1249,20 +1262,23 @@ Deploys are **not** one-time costs. Understand this before quoting a price to th
 2. 🟠 **`suspended`** — after **3 days** past-due and still unpaid (`SUSPEND_AFTER_DAYS = 3`), the resource is **suspended on Render** (the site/backend goes down, but is recoverable).
 3. 🔴 **`DELETED` / terminated** — after **30 days** past-due and still unpaid (`HARD_DELETE_AFTER_DAYS = 30`), the resource is **hard-deleted on Render** — **irrecoverable**. Billing stops.
 
-**Recovery.**
+**Recovery (user-facing).**
 
-- If `past_due` or `suspended`: **add credits** to the account (in the agentic app, by email), then run `retry-dunning.cjs` to re-charge and **resume** the suspended resource without waiting for the daily cron.
+- If `past_due` or `suspended`: **add credits** to the account (in the agentic app, by email), then run `retry-dunning.cjs` to re-charge and **resume** the suspended resource without waiting for the daily cron. This hits `POST /billing/retry-mine` — **tenant-scoped**, authenticated with the account's own API key, and only ever affects **this account's** resources.
 - If already **hard-deleted**: it is gone — it must be **rebuilt from scratch** (a fresh deploy).
 
 ```bash
-# After topping up credits: recover past-due / resume suspended resources
+# After topping up credits: recover YOUR OWN past-due / suspended resources
 node {baseDir}/scripts/retry-dunning.cjs
 ```
 
-**Manual billing run (ops/testing).** `run-billing.cjs` triggers the monthly billing run on demand. It is **idempotent per billing period** — resources already billed this month are skipped — so it's safe to run between cron fires.
+> ⚠️ `retry-mine` is rate-limited to **6/min per tenant**. On **HTTP 429**, wait ~1 minute and retry — don't hammer.
+
+**Admin-only global billing run (ops).** `run-billing.cjs` triggers the **GLOBAL** monthly billing sweep across **every tenant** on demand via `POST /billing/run`. This endpoint is **admin-only**: it requires an `x-admin-key` header, so the script reads an admin key from env `ADMIN_API_KEY` or `admin_api_key` in `~/.joni/agentbase/config.json` and refuses to run without one. It is **idempotent per billing period** (already-billed resources are skipped). **This is an ops/admin tool — a normal user or agent never runs it**; to resume your own resources use `retry-dunning.cjs` above. (Throttled to 3 / 5 min.)
 
 ```bash
-node {baseDir}/scripts/run-billing.cjs
+# ADMIN/OPS ONLY — needs an admin key
+ADMIN_API_KEY=... node {baseDir}/scripts/run-billing.cjs
 ```
 
 ### Log Filtering Note
