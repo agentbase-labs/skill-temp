@@ -495,15 +495,6 @@ node {baseDir}/scripts/retry-dunning.cjs
 
 > ⚠️ **Rate limit:** `retry-mine` is capped at **6/min per tenant**. On **HTTP 429**, back off and retry after ~1 minute — don't hammer.
 
-**Admin-only: trigger the GLOBAL monthly billing run (ops):**
-
-```bash
-# ADMIN/OPS ONLY — needs an admin key; do NOT run this as a normal user/agent.
-ADMIN_API_KEY=... node {baseDir}/scripts/run-billing.cjs
-```
-
-`run-billing.cjs` calls `POST /billing/run` — a **GLOBAL/admin-only** sweep across **every tenant**. It requires an `x-admin-key` header (env `ADMIN_API_KEY`, or `admin_api_key` in `~/.joni/agentbase/config.json`) and exits with a clear message if no admin key is available. Idempotent per period (already-billed resources are skipped). This is **not** something a normal user or agent runs — for resuming your own resources use `retry-dunning.cjs` above. (Throttled to 3 / 5 min.)
-
 ---
 
 ### Update Website Code — Full Procedure
@@ -704,7 +695,6 @@ node {baseDir}/scripts/delete-commits.cjs --workflow-id <id> --count <N> [--type
 | SSL not active                      | `verify-ssl.cjs --workflow-id <id>` (retry every 5 min)                       |
 | Backend not responding              | `verify-health.cjs --workflow-id <id>` (retry 2-3x, cold starts take 30-60s)  |
 | Site went down / `suspended` (unpaid) | Add credits, then `retry-dunning.cjs` → `/billing/retry-mine` (resumes **your own** suspended resources; 6/min) |
-| Manually run the monthly bill (ADMIN) | `run-billing.cjs` → `/billing/run` — **admin/ops only**, needs `ADMIN_API_KEY`; NOT a user command |
 
 ### Workflow Status
 
@@ -1264,7 +1254,6 @@ The API is now rate-limited per tenant. Expect and handle **HTTP 429 (Too Many R
 
 - **Spending endpoints** (`initialize`, `register-domain`, `deploy`, `provision-database`, `recreate-service`, `increase-budget`): ~**10/min per tenant**.
 - **`retry-dunning.cjs` → `/billing/retry-mine`** (user recovery): **6/min per tenant**.
-- **`run-billing.cjs` → `/billing/run`** and the admin dunning sweep (admin/ops): **3 / 5 min**.
 
 List endpoints (`workflow/list`, `website/list`) are paginated: `?limit=` (default 50, max 200) and `?offset=` (default 0), and return `pagination` metadata (`total`, `limit`, `offset`, `count`, `hasMore`) alongside the array. The array key is unchanged (`workflows` / `websites`), so existing parsing keeps working; page through with `offset` if a tenant has more than 50 items.
 
@@ -1293,13 +1282,6 @@ node {baseDir}/scripts/retry-dunning.cjs
 ```
 
 > ⚠️ `retry-mine` is rate-limited to **6/min per tenant**. On **HTTP 429**, wait ~1 minute and retry — don't hammer.
-
-**Admin-only global billing run (ops).** `run-billing.cjs` triggers the **GLOBAL** monthly billing sweep across **every tenant** on demand via `POST /billing/run`. This endpoint is **admin-only**: it requires an `x-admin-key` header, so the script reads an admin key from env `ADMIN_API_KEY` or `admin_api_key` in `~/.joni/agentbase/config.json` and refuses to run without one. It is **idempotent per billing period** (already-billed resources are skipped). **This is an ops/admin tool — a normal user or agent never runs it**; to resume your own resources use `retry-dunning.cjs` above. (Throttled to 3 / 5 min.)
-
-```bash
-# ADMIN/OPS ONLY — needs an admin key
-ADMIN_API_KEY=... node {baseDir}/scripts/run-billing.cjs
-```
 
 ### Log Filtering Note
 
