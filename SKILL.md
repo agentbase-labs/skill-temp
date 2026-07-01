@@ -67,6 +67,8 @@ node {baseDir}/scripts/check-balance.cjs
 - Full-stack (.com) → roughly **$75**
 - Full-stack (.io) → roughly **$125**
 
+⚠️ **These are one-time setup estimates.** On top of them, every deployed web service and database incurs a **recurring monthly** cost — roughly **~$7/mo per web service** (frontend or backend, `starter` plan) and **~$6–7/mo per database** — separate from the one-time domain registration cost. There is no free tier for tenant resources. See **Recurring Billing & Dunning** in the reference section.
+
 **Step C — If credits run out, the workflow pauses.** A step that hits `insufficient_credits` (HTTP 402) stops cleanly with no charge. To continue: **add credits to the account's email in the app**, then retry the step. For a workflow paused at `paused_insufficient_funds`, top up credits and use `increase-budget.cjs` to allocate more, then resume.
 
 ⚠️ **Sending crypto does nothing** — there is no wallet to fund. The deprecated `auto-fund.cjs` / `check-deposit.cjs` scripts now exit with an error pointing here.
@@ -234,7 +236,7 @@ node deploy.cjs --workflow-id <id> --framework angular --publish-path ./dist/my-
 
 **Never default to `static` for SSR frameworks (Next.js, Nuxt).** Static deploys have no server — SSR apps will be completely broken.
 
-Budget is checked before deploying.
+Deploying **spends credits** (atomic deduct, auto-refunded on failure) and returns **HTTP 402 `insufficient_credits`** if the account is out of credits. Note this is a **recurring** monthly charge for anything but a static site — see **Recurring Billing & Dunning**.
 
 **⛔ MANDATORY: After running deploy.cjs, you MUST wait for the build to complete before proceeding. Do not move to Step 6 until you have confirmed `live` status.**
 
@@ -399,7 +401,7 @@ node deploy-backend.cjs --workflow-id <id> --framework fastapi
 node deploy-backend.cjs --workflow-id <id> --framework nestjs --pre-deploy-cmd "npm run migration:run"
 ```
 
-Budget is checked before deploying.
+Deploying **spends credits** (atomic deduct, auto-refunded on failure) and returns **HTTP 402 `insufficient_credits`** if the account is out of credits. This is a **recurring** monthly charge while the backend is live — see **Recurring Billing & Dunning**.
 
 Auto-injected env vars: `DATABASE_URL` (if DB provisioned), `JWT_SECRET` (auto-generated), `PORT=10000` (all frameworks). Your `--env` values win on conflict, except `DATABASE_URL` which always uses the provisioned DB.
 
@@ -475,6 +477,29 @@ node {baseDir}/scripts/recreate-backend-service.cjs --workflow-id <id> [--framew
 ⚠️ **Use when a service was deployed with the wrong type or framework** (e.g., Next.js as static_site, or wrong backend framework). This deletes the old Render service and creates a new one with the correct framework. Auto-detects from committed code if `--framework` is not provided. Re-attaches custom domain/subdomain if configured. Backend version also re-injects DATABASE_URL and DB vars.
 
 After recreating, check service status and wait for the build to complete before proceeding.
+
+---
+
+### Recurring Billing & Recovery
+
+Live web services and databases are re-billed **monthly on the 1st** (see **Recurring Billing & Dunning** in the reference section). If a monthly charge fails, the resource goes `past_due` → `suspended` (after 3 days) → hard-`DELETED` (after 30 days).
+
+**Resume a suspended site after topping up credits:**
+
+```bash
+# 1. Add credits to the account email in the agentic app, then:
+node {baseDir}/scripts/retry-dunning.cjs
+```
+
+`retry-dunning.cjs` re-attempts payment for every past-due resource, resumes suspended ones on Render, and prints a summary (recovered / suspended / hard-deleted / still-past-due). Use it whenever a user tops up and needs their suspended site back up without waiting for the daily 06:00 UTC cron.
+
+**Trigger the monthly billing run manually (ops/testing):**
+
+```bash
+node {baseDir}/scripts/run-billing.cjs
+```
+
+`run-billing.cjs` charges every live billable resource for the current period. It is idempotent per period (already-billed resources are skipped), so it's safe to run any time. Prints a summary of what was billed and anything that entered dunning.
 
 ---
 
@@ -655,6 +680,8 @@ node {baseDir}/scripts/delete-commits.cjs --workflow-id <id> --count <N> [--type
 | Build passed but service crashed    | `deploy-logs.cjs --workflow-id <id> --type backend --log-type runtime`        |
 | SSL not active                      | `verify-ssl.cjs --workflow-id <id>` (retry every 5 min)                       |
 | Backend not responding              | `verify-health.cjs --workflow-id <id>` (retry 2-3x, cold starts take 30-60s)  |
+| Site went down / `suspended` (unpaid) | Add credits, then `retry-dunning.cjs` (resumes suspended resources)         |
+| Manually run the monthly bill (ops)   | `run-billing.cjs` (idempotent per period)                                   |
 
 ### Workflow Status
 
@@ -955,14 +982,16 @@ import { NestFactory } from "@nestjs/core";
 
 ---
 
-### 🟡 Render free tier services spin down after 15 minutes of inactivity
+### 🟡 Cold starts on low-tier services after inactivity
 
-Free tier web services go to sleep when idle. The first request after sleep takes 30-60 seconds (cold start). This affects:
+Lower-tier Render web services can spin down when idle; the first request after sleep takes 30-60 seconds (cold start). This affects:
 
 - Health check on `verify-health.cjs` — may timeout on first attempt
 - User experience — first visit is slow
 
-**Mitigation:** Use `starter` plan for backends that need to stay warm. For free tier, retry `verify-health` a couple of times before declaring failure.
+⚠️ **Note:** `free` is **NOT** an option for tenant resources — the backend auto-substitutes the cheapest paid plan (`starter`) and charges for it (see `resolveServicePlan`/`resolveDatabasePlan` in the backend). So this is about paid low-tier cold starts, not "free tier."
+
+**Mitigation:** Use a higher instance plan (`standard`+) for backends that must stay warm, and retry `verify-health` a couple of times before declaring failure.
 
 ---
 
@@ -1150,7 +1179,7 @@ All optional. Use only when defaults don't work.
 - `--publish-path <path>` — Static site publish directory (frontend only)
 - `--pre-deploy-cmd <cmd>` — Runs after build, before start (e.g. DB migrations)
 - `--health-check-path <path>` — Health endpoint for zero-downtime deploys
-- `--plan <plan>` — free, starter, standard, pro, pro_plus, pro_max, pro_ultra
+- `--plan <plan>` — free, starter, standard, pro, pro_plus, pro_max, pro_ultra. ⚠️ `free` is **NOT honored for tenant resources** — the backend auto-substitutes the cheapest paid plan (`starter`, ~$7/mo) and charges for it (see `resolveServicePlan` in the backend). Our Render account is shared across all tenants, so the single free slot can never be handed to a tenant service.
 - `--num-instances <n>` — Horizontal scaling
 - `--max-shutdown <sec>` — Graceful shutdown timeout (1-300)
 - `--region <region>` — oregon, ohio, virginia, frankfurt, singapore
@@ -1163,7 +1192,7 @@ All optional. Use only when defaults don't work.
 - `starter` (~$7/mo) — recommended default
 - `standard` (~$20/mo)
 - `pro`, `basic_256mb`..`basic_4gb`, `pro_4gb`..`pro_512gb`, `accelerated_16gb`..`accelerated_1024gb`
-- `free` — ⚠️ don't use, Render allows only 1 free DB per account
+- `free` — ⚠️ **NOT honored for tenant databases.** The backend auto-substitutes the cheapest paid DB plan (`basic_256mb`, ~$6/mo) and charges for it (see `resolveDatabasePlan` in the backend). Render allows only 1 free DB per (shared) account, so it can never be a tenant default.
 
 ### Costs
 
@@ -1171,11 +1200,12 @@ All optional. Use only when defaults don't work.
 | ------------------- | --------------------- |
 | .com domain         | ~$13-15/year          |
 | .io domain          | ~$35-40/year          |
-| Frontend deploy     | $0 (Render free tier) |
-| Backend deploy      | $0 (Render free tier) |
+| Frontend deploy     | ~$7/mo (starter plan — cheapest paid; no free tier for tenant services) |
+| Backend deploy      | ~$7/mo (starter plan — cheapest paid; no free tier for tenant services) |
 | Database (starter)  | ~$7/month             |
 | Database (standard) | ~$20/month            |
 | DNS + SSL           | $0 (Cloudflare)       |
+| Recurring billing   | Live web services & databases are billed monthly on the 1st |
 
 ### Workflow States
 
@@ -1184,6 +1214,14 @@ All optional. Use only when defaults don't work.
 Note: `registering_domain` is a transient in-progress state. If registration fails, the workflow is automatically reset to `initialized` so it can be retried.
 
 **Backend:** `not_started` → `database_provisioning` → `repo_created` → `code_committed` → `deployed` → `subdomain_attached` → `backend_live` ✅
+
+**Billing / dunning states (can occur for either lifecycle once a resource is live).** These are driven by the recurring billing cron, not the deploy flow — a completed/live workflow can still enter them later if a monthly charge fails:
+
+- `paused_insufficient_funds` — a workflow step (or the deploy budget) hit HTTP 402 `insufficient_credits`. **Handling:** add credits to the account email in the app, then `increase-budget.cjs` / retry the paused step.
+- `suspended` — a live resource went `past_due` and, after **3 days** unpaid, was suspended on Render (site/backend goes down but is recoverable). **Handling:** add credits, then run `retry-dunning.cjs` to resume it.
+- `DELETED` / `terminated` — a resource stayed unpaid **> 30 days** past-due and was hard-deleted on Render (irrecoverable). **Handling:** it must be rebuilt from scratch (new deploy).
+
+See **Recurring Billing & Dunning** below for the full ladder.
 
 ### Financial Safety
 
@@ -1196,6 +1234,36 @@ Note: `registering_domain` is a transient in-progress state. If registration fai
 - Cross-tenant safety: lookups scoped by tenant — no data leaks between customers
 - Stuck workflow recovery: failed domain registration resets workflow to `initialized` (retryable)
 - Idempotent deduct/refund keys prevent double-charges under retries; a best-effort local ledger (`/tenant/transactions`) records spends but never blocks a real spend
+
+### Recurring Billing & Dunning
+
+Deploys are **not** one-time costs. Understand this before quoting a price to the user.
+
+**Billing model.** Funds are in-app **credits** (1 credit = 1 USD), keyed by the tenant/account **email**. Usage — domain registration, deploys — debits credits immediately (atomic deduct-before-work; a failed downstream step auto-refunds).
+
+**Recurring charge.** Every **live web service and database** is re-billed **monthly on the 1st** (00:00 UTC) by a backend cron. A single deploy therefore recurs **every month** while the service stays live (~$7/mo per web service, ~$6–7/mo per database). Static sites are genuinely free on Render and are never charged.
+
+**Dunning ladder** (what happens when a recurring charge fails because the account is out of credits):
+
+1. 🟡 **`past_due`** — the charge returns HTTP 402, the resource is flagged past-due but **stays live** during a grace window. A daily retry cron (06:00 UTC) keeps re-attempting the charge.
+2. 🟠 **`suspended`** — after **3 days** past-due and still unpaid (`SUSPEND_AFTER_DAYS = 3`), the resource is **suspended on Render** (the site/backend goes down, but is recoverable).
+3. 🔴 **`DELETED` / terminated** — after **30 days** past-due and still unpaid (`HARD_DELETE_AFTER_DAYS = 30`), the resource is **hard-deleted on Render** — **irrecoverable**. Billing stops.
+
+**Recovery.**
+
+- If `past_due` or `suspended`: **add credits** to the account (in the agentic app, by email), then run `retry-dunning.cjs` to re-charge and **resume** the suspended resource without waiting for the daily cron.
+- If already **hard-deleted**: it is gone — it must be **rebuilt from scratch** (a fresh deploy).
+
+```bash
+# After topping up credits: recover past-due / resume suspended resources
+node {baseDir}/scripts/retry-dunning.cjs
+```
+
+**Manual billing run (ops/testing).** `run-billing.cjs` triggers the monthly billing run on demand. It is **idempotent per billing period** — resources already billed this month are skipped — so it's safe to run between cron fires.
+
+```bash
+node {baseDir}/scripts/run-billing.cjs
+```
 
 ### Log Filtering Note
 
