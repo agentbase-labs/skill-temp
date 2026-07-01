@@ -632,6 +632,25 @@ Fix the issue in code, repeat Steps 3–5.
 
 **Env var tips:** Pass `--env KEY=VALUE` to add/update. Pass `--env KEY=` (empty value) to remove. DB vars are always synced automatically on backend redeploys.
 
+### Delete Files
+
+Remove obsolete files from a repo. **Websites and backends use SEPARATE scripts/endpoints:**
+
+```bash
+# Website repo
+node {baseDir}/scripts/delete-files.cjs --workflow-id <id> \
+  --path src/Old.tsx --path public/stale.png [--message "Remove obsolete files"]
+
+# Backend repo
+node {baseDir}/scripts/delete-backend-files.cjs --workflow-id <id> \
+  --path src/old.module.ts [--message "Remove dead module"]
+```
+
+- 🔴 **Deletion does NOT auto-redeploy.** Follow with `redeploy.cjs` (website) or `redeploy-backend.cjs` (backend) to publish the change to the live service.
+- ⚠️ **Non-existent paths are NOT an error** — they come back in `not_found` and are simply skipped. If NONE of the given paths exist, no commit is created and the script reports that clearly.
+- Pass `--path` once per file (repeatable). At least one `--path` is required.
+- Rate limited to ~10 requests/min per tenant. On HTTP 429, wait ~1 minute and retry.
+
 ### Increase Budget
 
 ```bash
@@ -681,6 +700,7 @@ node {baseDir}/scripts/delete-commits.cjs --workflow-id <id> --count <N> [--type
 | Build triggered, waiting for result | `service-status.cjs --workflow-id <id> --type website\|backend`               |
 | Build failed                        | `deploy-logs.cjs --workflow-id <id> --type website\|backend --log-type build` |
 | Build passed but service crashed    | `deploy-logs.cjs --workflow-id <id> --type backend --log-type runtime`        |
+| Remove obsolete file(s) from a repo | `delete-files.cjs` (website) / `delete-backend-files.cjs` (backend) `--workflow-id <id> --path <p>` — then `redeploy.cjs`/`redeploy-backend.cjs` to publish |
 | SSL not active                      | `verify-ssl.cjs --workflow-id <id>` (retry every 5 min)                       |
 | Backend not responding              | `verify-health.cjs --workflow-id <id>` (retry 2-3x, cold starts take 30-60s)  |
 | Site went down / `suspended` (unpaid) | Add credits, then `retry-dunning.cjs` → `/billing/retry-mine` (resumes **your own** suspended resources; 6/min) |
