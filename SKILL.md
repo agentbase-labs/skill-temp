@@ -10,7 +10,7 @@ Deploy production apps: static sites, SSR frontends, backend APIs, PostgreSQL da
 
 Account creation happens automatically. Usage is paid with **in-app credits** (billing model B — 1 credit = 1 USD), keyed by the account's email. There is **no crypto wallet** to fund. Deployments tracked in `~/.joni/agentbase/websites.json`.
 
-**API Base:** `https://dev-render-api.agentbase.network/v1`
+**API Base:** taken from the `AGENT_BASE_URL` env var when set (e.g. prod: `https://prod-api.agentbase.network`), otherwise defaults to `https://dev-render-api.agentbase.network/v1`. `AGENT_BASE_URL` may omit the `/v1` suffix — it is appended automatically — and always overrides the `api_url` saved in config.
 **Config:** `~/.joni/agentbase/config.json` (auto-created on first run)
 
 > **Memory rule:** Every workflow has a single entry in `websites.json` keyed by `workflow_id`. That entry must contain ALL relevant data — frontend URLs, backend URLs, service IDs, env vars, DB info, domain info, deploy IDs. After every step, check what was saved. Never rely on memory across tool calls — always read `websites.json` first.

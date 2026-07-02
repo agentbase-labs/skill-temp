@@ -7,7 +7,31 @@ const path = require('path');
 
 const CONFIG_DIR = path.join(process.env.HOME, '.joni', 'agentbase');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
-const API_URL_DEFAULT = 'https://dev-render-api.agentbase.network/v1';
+
+// The agent app that installs this skill can point it at a specific AgentBase
+// deployment via the AGENT_BASE_URL env var (e.g. prod:
+// https://prod-api.agentbase.network). dev_render and prod are deployed on
+// different links but share this one skill, so AGENT_BASE_URL selects which
+// backend to talk to. If it is NOT set, we fall back to the historic default.
+//
+// AGENT_BASE_URL may be given with or without the /v1 API version suffix and
+// with or without a trailing slash; normalizeApiUrl() makes it canonical so the
+// endpoint paths (e.g. `/tenant`) resolve correctly.
+const API_URL_FALLBACK = 'https://dev-render-api.agentbase.network/v1';
+
+function normalizeApiUrl(raw) {
+  if (!raw) return raw;
+  let url = String(raw).trim().replace(/\/+$/, ''); // strip trailing slashes
+  if (!/\/v\d+$/.test(url)) {
+    url += '/v1'; // append version segment if the env value omitted it
+  }
+  return url;
+}
+
+// Resolved API base: AGENT_BASE_URL wins when present, else historic default.
+const API_URL_DEFAULT = process.env.AGENT_BASE_URL
+  ? normalizeApiUrl(process.env.AGENT_BASE_URL)
+  : API_URL_FALLBACK;
 
 function loadConfig() {
   if (!fs.existsSync(CONFIG_FILE)) {
@@ -16,6 +40,13 @@ function loadConfig() {
   const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
   if (!config.api_url || !config.api_key || !config.tenant_id) {
     throw new Error(`Invalid config in ${CONFIG_FILE}`);
+  }
+  // If AGENT_BASE_URL is set, it always overrides the api_url persisted in
+  // config.json. This lets the same saved account be pointed at a different
+  // AgentBase deployment (e.g. prod) without re-running signup, and prevents a
+  // config written against dev from silently pinning calls to dev.
+  if (process.env.AGENT_BASE_URL) {
+    config.api_url = normalizeApiUrl(process.env.AGENT_BASE_URL);
   }
   return config;
 }
@@ -118,4 +149,4 @@ function parseArgs() {
   return { get, getAll, files, raw: args };
 }
 
-module.exports = { loadConfig, saveConfig, api, tenantId, parseArgs, CONFIG_DIR, CONFIG_FILE, API_URL_DEFAULT };
+module.exports = { loadConfig, saveConfig, api, tenantId, parseArgs, CONFIG_DIR, CONFIG_FILE, API_URL_DEFAULT, normalizeApiUrl };
