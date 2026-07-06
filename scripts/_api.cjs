@@ -33,6 +33,63 @@ const API_URL_DEFAULT = process.env.AGENT_BASE_URL
   ? normalizeApiUrl(process.env.AGENT_BASE_URL)
   : API_URL_FALLBACK;
 
+// ────────────────────────────────────────────────────────────────────────
+// AgentMail email resolution + drift guard
+//
+// The tenant's AgentMail email is the Credits API identity that gets BILLED.
+// It must be resolved consistently and never silently drift to a different
+// account (which would spend someone else's credits). Precedence:
+//   1. AGENTMAIL_INBOX_ID   (env)
+//   2. JONI_EMAIL_ADDRESS   (env)
+//   3. config.email         (persisted at signup, only if config exists)
+// ────────────────────────────────────────────────────────────────────────
+
+/** Resolve the AgentMail email from env, falling back to a config object. */
+function resolveEmail(config = null) {
+  return (
+    process.env.AGENTMAIL_INBOX_ID ||
+    process.env.JONI_EMAIL_ADDRESS ||
+    (config && config.email) ||
+    null
+  );
+}
+
+/** Resolve the AgentMail email from env ONLY (ignores config). */
+function resolveEnvEmail() {
+  return process.env.AGENTMAIL_INBOX_ID || process.env.JONI_EMAIL_ADDRESS || null;
+}
+
+/**
+ * DRIFT GUARD. When a config.json already exists AND an env email is set, the
+ * env email MUST match config.email. A mismatch means the environment now
+ * points at a DIFFERENT AgentMail account than the one this saved tenant was
+ * created for — running would spend the wrong account's credits. Refuse.
+ *
+ * If no env email is set, we do NOT trip the guard (fall back to config
+ * silently). Never auto re-signs up. Exits the process on mismatch.
+ */
+function assertNoEmailDrift() {
+  if (!fs.existsSync(CONFIG_FILE)) return; // nothing saved yet — nothing to drift from
+  const envEmail = resolveEnvEmail();
+  if (!envEmail) return; // env unset — fall back to config silently
+
+  let config;
+  try {
+    config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+  } catch {
+    return; // unreadable config — let downstream loadConfig surface it
+  }
+  if (!config.email) return; // legacy config with no email — nothing to compare
+
+  if (envEmail !== config.email) {
+    console.error(
+      `❌ AgentMail email mismatch: env=${envEmail} config=${config.email}. ` +
+        `Refusing to run to avoid spending another account's credits. Contact support.`,
+    );
+    process.exit(1);
+  }
+}
+
 function loadConfig() {
   if (!fs.existsSync(CONFIG_FILE)) {
     throw new Error(`Config not found at ${CONFIG_FILE}. Run auto-signup first.`);
@@ -149,4 +206,4 @@ function parseArgs() {
   return { get, getAll, files, raw: args };
 }
 
-module.exports = { loadConfig, saveConfig, api, tenantId, parseArgs, CONFIG_DIR, CONFIG_FILE, API_URL_DEFAULT, normalizeApiUrl };
+module.exports = { loadConfig, saveConfig, api, tenantId, parseArgs, CONFIG_DIR, CONFIG_FILE, API_URL_DEFAULT, normalizeApiUrl, resolveEmail, resolveEnvEmail, assertNoEmailDrift };

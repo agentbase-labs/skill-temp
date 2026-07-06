@@ -7,7 +7,7 @@
  * an out-of-credits step returns HTTP 402 insufficient_credits.
  */
 const fs = require("fs");
-const { api, tenantId, loadConfig, parseArgs, CONFIG_FILE } = require("./_api.cjs");
+const { api, tenantId, loadConfig, parseArgs, CONFIG_FILE, assertNoEmailDrift } = require("./_api.cjs");
 const { autoSignup } = require("./auto-signup.cjs");
 const { upsert } = require("./_db.cjs");
 
@@ -25,6 +25,11 @@ if (!prompt || !budget) {
 }
 
 (async () => {
+  // Drift guard: if a saved config exists and the env AgentMail email now
+  // differs from config.email, refuse before spending another account's
+  // credits. No-op when env email is unset or no config exists yet.
+  assertNoEmailDrift();
+
   // Auto-setup (credits-based account, keyed by email)
   if (!fs.existsSync(CONFIG_FILE)) await autoSignup();
 
